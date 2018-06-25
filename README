@@ -1,0 +1,8 @@
+Command cloudwatch-redis-queues publishes size of redis queues as CloudWatch
+metrics.
+
+Usage of cloudwatch-redis-queues:
+  -namespace string
+    	CloudWatch namespace (default "Redis queues")
+  -redis string
+    	redis address (default "localhost:6379")
