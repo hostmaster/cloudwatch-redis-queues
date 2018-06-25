@@ -6,3 +6,5 @@ Usage of cloudwatch-redis-queues:
     	CloudWatch namespace (default "Redis queues")
   -redis string
     	redis address (default "localhost:6379")
+  -withMax
+    	create extra computed MAX metric holding size of largest queue

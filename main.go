@@ -24,18 +24,19 @@ func main() {
 	args := struct {
 		Redis     string `flag:"redis,redis address"`
 		Namespace string `flag:"namespace,CloudWatch namespace"`
+		WithMax   bool   `flag:"withMax,create extra computed MAX metric holding size of largest queue"`
 	}{
 		Redis:     "localhost:6379",
 		Namespace: "Redis queues",
 	}
 	autoflags.Parse(&args)
-	if err := run(args.Redis, args.Namespace); err != nil {
+	if err := run(args.Redis, args.Namespace, args.WithMax); err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
 	}
 }
 
-func run(addr, namespace string) error {
+func run(addr, namespace string, withMax bool) error {
 	pool, err := pool.NewCustom("tcp", addr, 1, func(network, addr string) (*redis.Client, error) {
 		conn, err := net.DialTimeout(network, addr, time.Second)
 		if err != nil {
@@ -70,12 +71,12 @@ func run(addr, namespace string) error {
 			}
 		}
 		i++
-		m, err := metrics(pool, keys, now)
+		if len(keys) == 0 {
+			continue
+		}
+		m, err := metrics(pool, keys, now, withMax)
 		if err != nil {
 			return err
-		}
-		if len(m) == 0 {
-			continue
 		}
 		input := cloudwatch.PutMetricDataInput{
 			Namespace:  &namespace,
@@ -107,20 +108,36 @@ func putMetricData(svc *cloudwatch.CloudWatch, input *cloudwatch.PutMetricDataIn
 	return err
 }
 
-func metrics(pool *pool.Pool, keys []string, now time.Time) ([]*cloudwatch.MetricDatum, error) {
-	out := make([]*cloudwatch.MetricDatum, 0, len(keys))
+func metrics(pool *pool.Pool, keys []string, now time.Time, withMax bool) ([]*cloudwatch.MetricDatum, error) {
+	l := len(keys)
+	if withMax {
+		l++
+	}
+	out := make([]*cloudwatch.MetricDatum, 0, l)
 	unit := aws.String(cloudwatch.StandardUnitCount)
 	stamp := now.Unix()
+	var max int
 	for _, key := range keys {
 		val, err := pool.Cmd("ZCOUNT", key, 0, stamp).Int()
 		if err != nil {
 			return nil, errors.Wrapf(err, "ZCOUNT %s 0 %d", key, stamp)
+		}
+		if val > max {
+			max = val
 		}
 		out = append(out, &cloudwatch.MetricDatum{
 			MetricName: aws.String(strings.TrimSuffix(key, ":queue")),
 			Timestamp:  &now,
 			Unit:       unit,
 			Value:      aws.Float64(float64(val)),
+		})
+	}
+	if withMax {
+		out = append(out, &cloudwatch.MetricDatum{
+			MetricName: aws.String("MAX"),
+			Timestamp:  &now,
+			Unit:       unit,
+			Value:      aws.Float64(float64(max)),
 		})
 	}
 	return out, nil
