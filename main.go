@@ -64,7 +64,7 @@ func run(addr, namespace string) error {
 	var i uint
 	var keys []string
 	for now := range ticker.C {
-		if i%60 == 0 {
+		if i%10 == 0 {
 			if keys, err = pool.Cmd("keys", "*:queue").List(); err != nil {
 				return errors.WithMessage(err, "keys *:queue command")
 			}
