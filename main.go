@@ -5,6 +5,7 @@ package main
 import (
 	"context"
 	"fmt"
+	"log"
 	"net"
 	"os"
 	"strings"
@@ -16,6 +17,7 @@ import (
 	"github.com/aws/aws-sdk-go/aws/session"
 	"github.com/aws/aws-sdk-go/service/cloudwatch"
 	"github.com/mediocregopher/radix.v2/pool"
+	"github.com/mediocregopher/radix.v2/pubsub"
 	"github.com/mediocregopher/radix.v2/redis"
 	"github.com/pkg/errors"
 )
@@ -25,18 +27,19 @@ func main() {
 		Redis     string `flag:"redis,redis address"`
 		Namespace string `flag:"namespace,CloudWatch namespace"`
 		WithMax   bool   `flag:"withMax,create extra computed MAX metric holding size of largest queue"`
+		WithStats bool   `flag:"withCommandStats,export per-queue statistics of ZADD/ZREM commands (CPU hungry)"`
 	}{
 		Redis:     "localhost:6379",
 		Namespace: "Redis queues",
 	}
 	autoflags.Parse(&args)
-	if err := run(args.Redis, args.Namespace, args.WithMax); err != nil {
+	if err := run(args.Redis, args.Namespace, args.WithMax, args.WithStats); err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
 	}
 }
 
-func run(addr, namespace string, withMax bool) error {
+func run(addr, namespace string, withMax, withStats bool) error {
 	pool, err := pool.NewCustom("tcp", addr, 1, func(network, addr string) (*redis.Client, error) {
 		conn, err := net.DialTimeout(network, addr, time.Second)
 		if err != nil {
@@ -60,6 +63,13 @@ func run(addr, namespace string, withMax bool) error {
 		return errors.WithMessage(err, "ec2 instance metadata fetch")
 	}
 	svc := cloudwatch.New(sess, aws.NewConfig().WithRegion(meta.Region))
+
+	if withStats {
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		go statIngestLoop(ctx, svc, pool, namespace)
+	}
+
 	ticker := time.NewTicker(time.Minute)
 	defer ticker.Stop()
 	var i uint
@@ -141,4 +151,116 @@ func metrics(pool *pool.Pool, keys []string, now time.Time, withMax bool) ([]*cl
 		})
 	}
 	return out, nil
+}
+
+func statIngestLoop(ctx context.Context, svc *cloudwatch.CloudWatch, pool *pool.Pool, namespace string) error {
+	ticker := time.NewTicker(10 * time.Second)
+	defer ticker.Stop()
+	for {
+		switch err := statIngest(ctx, svc, pool, namespace); err {
+		case context.Canceled, context.DeadlineExceeded:
+			return err
+		case nil:
+		default:
+			log.Print("command stats ingest: ", err)
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-ticker.C:
+		}
+	}
+}
+
+func statIngest(ctx context.Context, svc *cloudwatch.CloudWatch, pool *pool.Pool, namespace string) error {
+	conn, err := pool.Get()
+	if err != nil {
+		return err
+	}
+	defer conn.Close()
+	if err := conn.Cmd("config", "set", "notify-keyspace-events", "Ez").Err; err != nil {
+		return err
+	}
+	pclient := pubsub.NewSubClient(conn)
+	if err := pclient.Subscribe(zaddChannel, zremChannel).Err; err != nil {
+		return err
+	}
+	ticker := time.NewTicker(time.Minute)
+	defer ticker.Stop()
+	stats := make(map[string]counts)
+	for {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-ticker.C:
+			go func(stats map[string]counts) {
+				if err := publishCommandStats(ctx, svc, namespace, stats); err != nil {
+					log.Println("publish command stats: ", err)
+				}
+			}(stats)
+			stats = make(map[string]counts, len(stats))
+		default:
+		}
+		resp := pclient.Receive()
+		if resp.Err != nil {
+			return err
+		}
+		if resp.Type != pubsub.Message ||
+			!strings.HasSuffix(resp.Message, ":queue") {
+			continue
+		}
+		v := stats[resp.Message]
+		switch resp.Channel {
+		case zaddChannel:
+			v.zadd++
+		case zremChannel:
+			v.zrem++
+		}
+		stats[resp.Message] = v
+	}
+}
+
+func publishCommandStats(ctx context.Context, svc *cloudwatch.CloudWatch, namespace string, stats map[string]counts) error {
+	if len(stats) == 0 {
+		return nil
+	}
+	metrics := make([]*cloudwatch.MetricDatum, 0, len(stats)*2)
+	unit := aws.String(cloudwatch.StandardUnitCount)
+	now := time.Now()
+	dimName := aws.String("Command")
+	for k, v := range stats {
+		name := strings.TrimSuffix(k, ":queue")
+		metrics = append(metrics, &cloudwatch.MetricDatum{
+			MetricName: &name,
+			Timestamp:  &now,
+			Unit:       unit,
+			Value:      aws.Float64(float64(v.zadd)),
+			Dimensions: []*cloudwatch.Dimension{{
+				Name: dimName, Value: aws.String("zadd"),
+			}},
+		}, &cloudwatch.MetricDatum{
+			MetricName: &name,
+			Timestamp:  &now,
+			Unit:       unit,
+			Value:      aws.Float64(float64(v.zrem)),
+			Dimensions: []*cloudwatch.Dimension{{
+				Name: dimName, Value: aws.String("zrem"),
+			}},
+		})
+	}
+
+	input := cloudwatch.PutMetricDataInput{
+		Namespace:  &namespace,
+		MetricData: metrics,
+	}
+	return putMetricData(svc, &input, 30*time.Second)
+}
+
+const (
+	zaddChannel = "__keyevent@0__:zadd"
+	zremChannel = "__keyevent@0__:zrem"
+)
+
+type counts struct {
+	zadd, zrem int
 }
