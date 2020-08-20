@@ -13,7 +13,6 @@ import (
 
 	"github.com/artyom/autoflags"
 	"github.com/aws/aws-sdk-go/aws"
-	"github.com/aws/aws-sdk-go/aws/ec2metadata"
 	"github.com/aws/aws-sdk-go/aws/session"
 	"github.com/aws/aws-sdk-go/service/cloudwatch"
 	"github.com/mediocregopher/radix.v2/pool"
@@ -23,15 +22,22 @@ import (
 )
 
 func main() {
+	redisAddr := "localhost:6379"
+
+	if env := os.Getenv("REDIS_ADDR"); env != "" {
+		redisAddr = env
+	}
+
 	args := struct {
-		Redis     string `flag:"redis,redis address"`
+		Redis     string `flag:"redis,redis address (REDIS_ADDR env)"`
 		Namespace string `flag:"namespace,CloudWatch namespace"`
 		WithMax   bool   `flag:"withMax,create extra computed MAX metric holding size of largest queue"`
 		WithStats bool   `flag:"withCommandStats,export per-queue statistics of ZADD/ZREM commands (CPU hungry)"`
 	}{
-		Redis:     "localhost:6379",
+		Redis:     redisAddr,
 		Namespace: "Redis queues",
 	}
+
 	autoflags.Parse(&args)
 	if err := run(args.Redis, args.Namespace, args.WithMax, args.WithStats); err != nil {
 		fmt.Fprintln(os.Stderr, err)
@@ -58,11 +64,8 @@ func run(addr, namespace string, withMax, withStats bool) error {
 	if err != nil {
 		return errors.WithMessage(err, "AWS session create")
 	}
-	meta, err := ec2metadata.New(sess).GetInstanceIdentityDocument()
-	if err != nil {
-		return errors.WithMessage(err, "ec2 instance metadata fetch")
-	}
-	svc := cloudwatch.New(sess, aws.NewConfig().WithRegion(meta.Region))
+
+	svc := cloudwatch.New(sess)
 
 	if withStats {
 		ctx, cancel := context.WithCancel(context.Background())
