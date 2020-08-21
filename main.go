@@ -87,7 +87,7 @@ func run(addr, namespace string, withMax, withStats bool) error {
 		if len(keys) == 0 {
 			continue
 		}
-		m, err := metrics(pool, keys, now, withMax)
+		m, err := metrics(pool, keys, now.UTC(), withMax)
 		if err != nil {
 			return err
 		}
@@ -140,7 +140,7 @@ func metrics(pool *pool.Pool, keys []string, now time.Time, withMax bool) ([]*cl
 		}
 		out = append(out, &cloudwatch.MetricDatum{
 			MetricName: aws.String(strings.TrimSuffix(key, ":queue")),
-			Timestamp:  &now,
+			Timestamp:  aws.Time(now)
 			Unit:       unit,
 			Value:      aws.Float64(float64(val)),
 		})
@@ -148,7 +148,7 @@ func metrics(pool *pool.Pool, keys []string, now time.Time, withMax bool) ([]*cl
 	if withMax {
 		out = append(out, &cloudwatch.MetricDatum{
 			MetricName: aws.String("MAX"),
-			Timestamp:  &now,
+			Timestamp:  aws.Time(now),
 			Unit:       unit,
 			Value:      aws.Float64(float64(max)),
 		})
@@ -229,13 +229,13 @@ func publishCommandStats(ctx context.Context, svc *cloudwatch.CloudWatch, namesp
 	}
 	metrics := make([]*cloudwatch.MetricDatum, 0, len(stats)*2)
 	unit := aws.String(cloudwatch.StandardUnitCount)
-	now := time.Now()
+	now := time.Now().UTC()
 	dimName := aws.String("Command")
 	for k, v := range stats {
 		name := strings.TrimSuffix(k, ":queue")
 		metrics = append(metrics, &cloudwatch.MetricDatum{
 			MetricName: &name,
-			Timestamp:  &now,
+			Timestamp:  aws.Time(now),
 			Unit:       unit,
 			Value:      aws.Float64(float64(v.zadd)),
 			Dimensions: []*cloudwatch.Dimension{{
@@ -243,7 +243,7 @@ func publishCommandStats(ctx context.Context, svc *cloudwatch.CloudWatch, namesp
 			}},
 		}, &cloudwatch.MetricDatum{
 			MetricName: &name,
-			Timestamp:  &now,
+			Timestamp:  aws.Time(now),
 			Unit:       unit,
 			Value:      aws.Float64(float64(v.zrem)),
 			Dimensions: []*cloudwatch.Dimension{{
