@@ -31,6 +31,7 @@ func main() {
 	args := struct {
 		Redis     string `flag:"redis,redis address (REDIS_ADDR env)"`
 		Namespace string `flag:"namespace,CloudWatch namespace"`
+		Queues    string `flag:"queues, static list of queues"`
 		WithMax   bool   `flag:"withMax,create extra computed MAX metric holding size of largest queue"`
 		WithStats bool   `flag:"withCommandStats,export per-queue statistics of ZADD/ZREM commands (CPU hungry)"`
 	}{
@@ -39,13 +40,21 @@ func main() {
 	}
 
 	autoflags.Parse(&args)
-	if err := run(args.Redis, args.Namespace, args.WithMax, args.WithStats); err != nil {
+	var queues []string
+	if args.Queues != "" {
+		queues := strings.Split(args.Queues, ",")
+		for i, e := range queues {
+			queues[i] = fmt.Sprintf("%s:queue", strings.TrimSpace(e))
+		}
+	}
+
+	if err := run(args.Redis, args.Namespace, queues, args.WithMax, args.WithStats); err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
 	}
 }
 
-func run(addr, namespace string, withMax, withStats bool) error {
+func run(addr, namespace string, queues []string, withMax, withStats bool) error {
 	pool, err := pool.NewCustom("tcp", addr, 1, func(network, addr string) (*redis.Client, error) {
 		conn, err := net.DialTimeout(network, addr, time.Second)
 		if err != nil {
@@ -75,19 +84,11 @@ func run(addr, namespace string, withMax, withStats bool) error {
 
 	ticker := time.NewTicker(time.Minute)
 	defer ticker.Stop()
-	var i uint
-	var keys []string
 	for now := range ticker.C {
-		if i%10 == 0 {
-			if keys, err = pool.Cmd("keys", "*:queue").List(); err != nil {
-				return errors.WithMessage(err, "keys *:queue command")
-			}
-		}
-		i++
-		if len(keys) == 0 {
+		if len(queues) == 0 {
 			continue
 		}
-		m, err := metrics(pool, keys, now.UTC(), withMax)
+		m, err := metrics(pool, queues, now.UTC(), withMax)
 		if err != nil {
 			return err
 		}
@@ -140,7 +141,7 @@ func metrics(pool *pool.Pool, keys []string, now time.Time, withMax bool) ([]*cl
 		}
 		out = append(out, &cloudwatch.MetricDatum{
 			MetricName: aws.String(strings.TrimSuffix(key, ":queue")),
-			Timestamp:  aws.Time(now)
+			Timestamp:  aws.Time(now),
 			Unit:       unit,
 			Value:      aws.Float64(float64(val)),
 		})
