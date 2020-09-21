@@ -42,7 +42,7 @@ func main() {
 	autoflags.Parse(&args)
 	var queues []string
 	if args.Queues != "" {
-		queues := strings.Split(args.Queues, ",")
+		queues = strings.Split(args.Queues, ",")
 		for i, e := range queues {
 			queues[i] = fmt.Sprintf("%s:queue", strings.TrimSpace(e))
 		}
